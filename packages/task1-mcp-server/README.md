@@ -14,7 +14,7 @@ npx tsx packages/task1-mcp-server/src/server.ts   # from repo root
 npm run -s task1                                   # same; -s stops npm printing its "> script" banner on stdout
 ```
 
-Point any MCP client at that command (e.g. Claude Desktop / MCP Inspector: `npx @modelcontextprotocol/inspector npx tsx packages/task1-mcp-server/src/server.ts`).
+Point any MCP client at that command (e.g. MCP Inspector: `npx @modelcontextprotocol/inspector npx tsx packages/task1-mcp-server/src/server.ts`).
 
 ## Error mapping
 

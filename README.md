@@ -1,6 +1,6 @@
-# AI Field Developer / Solutions Engineer — assessment
+# mcp-llm-gateway-kit
 
-Four runnable solutions, one TypeScript workspace, 72 tests.
+Four small, runnable building blocks for putting LLMs and MCP tools behind a gateway — one TypeScript workspace, 72 tests.
 
 | task | package | what it is |
 |---|---|---|
@@ -20,7 +20,7 @@ npm run task1 | task2 | task3 | task4   # run a service (see each README for the
 
 Each package is self-contained: `src/` (implementation + a mock peer so it runs with no external accounts), `test/` (vitest, real sockets, no mocks of the code under test), `README.md` (design, decision tables, assumptions).
 
-## Assumptions made where the brief was open
+## Design choices
 
 * **Task 1** returns protocol errors (`-32602`) for malformed arguments and tool-level `isError` results for business failures (unknown customer, suspended account), following the MCP tools spec. It is built on the SDK's low-level `Server` because the high-level `McpServer` swallows validation failures into tool results.
 * **Task 2** resolves tokens with a static token→role map (`GATEWAY_TOKENS`, fails closed when unset) behind one function; JWT/introspection is a drop-in there. `tools/list` is forwarded unfiltered, as asked. Batch members are judged individually per JSON-RPC 2.0 §6: blocked/invalid ones are answered locally, the rest forwarded and the responses merged.

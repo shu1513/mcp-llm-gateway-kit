@@ -42,7 +42,7 @@ Luhn filtering (default on) keeps order numbers like `1234 5678 9012 3456` intac
 
 ## Assumptions
 
-* OpenAI chat-completions SSE format (the de-facto gateway contract; Anthropic/Bedrock adapters would translate to the same chunk shape before the redactor).
+* OpenAI chat-completions SSE format (the de-facto gateway contract; adapters for other providers would translate to the same chunk shape before the redactor).
 * Single choice (`n=1`); multi-choice streams would need one redactor per choice index.
 * Patterns are deliberately simple regexes; a production guardrail would add phone numbers, IBANs, and a configurable allow-list.
 

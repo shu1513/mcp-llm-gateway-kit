@@ -1,8 +1,8 @@
 {
-  "name": "ai-field-assessment",
+  "name": "mcp-llm-gateway-kit",
   "private": true,
   "version": "1.0.0",
-  "description": "AI Field Developer / Solutions Engineer assessment: MCP server, MCP gateway, streaming PII guardrail, rate-limited model router",
+  "description": "MCP server, MCP auth gateway, streaming PII guardrail and rate-limited model router in TypeScript",
   "type": "module",
   "workspaces": ["packages/*"],
   "engines": { "node": ">=20" },
