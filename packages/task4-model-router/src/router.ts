@@ -28,13 +28,19 @@ export interface RouterOptions {
   log?: (msg: string, extra?: unknown) => void;
 }
 
+export interface Attempt {
+  provider: string;
+  outcome: "ok" | "timeout" | "rate_limited" | "unreachable" | "malformed" | "error" | "cancelled";
+  ms: number;
+}
+
 export interface RouteResult {
   provider: string;
   status: number;
   body: unknown;
   /** Total tokens reported by the provider, if any. */
   totalTokens?: number;
-  attempts: Array<{ provider: string; outcome: string; ms: number }>;
+  attempts: Attempt[];
 }
 
 export interface Usage {
@@ -55,22 +61,26 @@ export class ModelRouter {
     this.log = opts.log ?? (() => {});
   }
 
-  async route(body: Record<string, unknown>, signal?: AbortSignal): Promise<RouteResult> {
-    const attempts: RouteResult["attempts"] = [];
+  /**
+   * @param attempts optional sink that receives every attempt even when the
+   *   call ultimately throws (the caller uses it for token accounting).
+   */
+  async route(body: Record<string, unknown>, signal?: AbortSignal, attempts: Attempt[] = []): Promise<RouteResult> {
     let lastError: GatewayError | undefined;
 
     for (const provider of this.opts.providers) {
+      // Cancellation is terminal: never start (or fail over to) another paid call for a client that left.
+      if (signal?.aborted) throw new GatewayError("client_closed", "Client closed the request");
+
       const started = Date.now();
       const outcome = await this.callProvider(provider, body, signal);
       const ms = Date.now() - started;
+      attempts.push({ provider: provider.name, outcome: outcome.outcome, ms });
 
       if (outcome.kind === "ok") {
-        attempts.push({ provider: provider.name, outcome: "ok", ms });
         return { provider: provider.name, status: outcome.status, body: outcome.body, totalTokens: outcome.totalTokens, attempts };
       }
-      attempts.push({ provider: provider.name, outcome: outcome.kind, ms });
-      this.log("provider attempt failed", { provider: provider.name, outcome: outcome.kind, ms });
-
+      this.log("provider attempt failed", { provider: provider.name, outcome: outcome.outcome, ms });
       if (outcome.kind === "failover") {
         lastError = outcome.error;
         continue; // try the next provider
@@ -78,12 +88,7 @@ export class ModelRouter {
       throw outcome.error; // non-failover error: surface immediately (sanitized)
     }
 
-    throw new GatewayError(
-      "all_providers_failed",
-      "All model providers are unavailable",
-      lastError?.retryAfterMs,
-      attempts,
-    );
+    throw new GatewayError("all_providers_failed", "All model providers are unavailable", lastError?.retryAfterMs, attempts);
   }
 
   private async callProvider(
@@ -91,9 +96,9 @@ export class ModelRouter {
     body: Record<string, unknown>,
     clientSignal?: AbortSignal,
   ): Promise<
-    | { kind: "ok"; status: number; body: unknown; totalTokens?: number }
-    | { kind: "failover"; error: GatewayError }
-    | { kind: "fatal"; error: GatewayError }
+    | { kind: "ok"; outcome: "ok"; status: number; body: unknown; totalTokens?: number }
+    | { kind: "failover"; outcome: Attempt["outcome"]; error: GatewayError }
+    | { kind: "fatal"; outcome: Attempt["outcome"]; error: GatewayError }
   > {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error("timeout")), this.timeoutMs);
@@ -111,10 +116,11 @@ export class ModelRouter {
           signal: controller.signal,
         });
       } catch (e) {
+        if (clientSignal?.aborted) return { kind: "fatal", outcome: "cancelled", error: new GatewayError("client_closed", "Client closed the request") };
         const timedOut = controller.signal.aborted && (controller.signal.reason as Error)?.message === "timeout";
-        if (clientSignal?.aborted) return { kind: "fatal", error: new GatewayError("bad_request", "Client closed the request") };
         return {
           kind: "failover",
+          outcome: timedOut ? "timeout" : "unreachable",
           error: new GatewayError(
             timedOut ? "upstream_timeout" : "upstream_error",
             timedOut ? `Provider ${provider.name} timed out` : `Provider ${provider.name} unreachable`,
@@ -130,19 +136,22 @@ export class ModelRouter {
       try {
         text = await res.text();
       } catch (e) {
-        return { kind: "failover", error: new GatewayError("upstream_timeout", `Provider ${provider.name} stalled`, undefined, e) };
+        if (clientSignal?.aborted) return { kind: "fatal", outcome: "cancelled", error: new GatewayError("client_closed", "Client closed the request") };
+        return { kind: "failover", outcome: "timeout", error: new GatewayError("upstream_timeout", `Provider ${provider.name} stalled`, undefined, e) };
       }
 
       if (res.status === 429) {
         const ra = Number(res.headers.get("retry-after"));
         return {
           kind: "failover",
+          outcome: "rate_limited",
           error: new GatewayError("upstream_rate_limited", `Provider ${provider.name} rate limited`, Number.isFinite(ra) && ra > 0 ? ra * 1000 : undefined, text.slice(0, 500)),
         };
       }
       if (!res.ok) {
         return {
           kind: "fatal",
+          outcome: "error",
           error: new GatewayError("upstream_error", `Provider ${provider.name} returned an error`, undefined, { status: res.status, body: text.slice(0, 500) }),
         };
       }
@@ -151,10 +160,10 @@ export class ModelRouter {
       try {
         json = JSON.parse(text);
       } catch (e) {
-        return { kind: "failover", error: new GatewayError("upstream_error", `Provider ${provider.name} returned a malformed response`, undefined, e) };
+        return { kind: "failover", outcome: "malformed", error: new GatewayError("upstream_error", `Provider ${provider.name} returned a malformed response`, undefined, e) };
       }
       const usage = (json as { usage?: Usage })?.usage;
-      return { kind: "ok", status: res.status, body: json, totalTokens: usage?.total_tokens };
+      return { kind: "ok", outcome: "ok", status: res.status, body: json, totalTokens: usage?.total_tokens };
     } finally {
       clearTimeout(timer);
       clientSignal?.removeEventListener("abort", onClientAbort);

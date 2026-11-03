@@ -2,10 +2,15 @@
 export class SseParser {
   private partial = "";
   private dataLines: string[] = [];
+  private dataBytes = 0;
+
+  /** @param maxEventBytes upper bound on one event's data (and on an unterminated line); exceeding it throws. */
+  constructor(private readonly maxEventBytes = 1_000_000) {}
 
   /** Returns the complete event data payloads found so far. */
   feed(text: string): string[] {
     this.partial += text;
+    if (this.partial.length > this.maxEventBytes) throw new Error("SSE line exceeds maxEventBytes");
     const out: string[] = [];
     let nl: number;
     while ((nl = this.partial.indexOf("\n")) !== -1) {
@@ -16,11 +21,17 @@ export class SseParser {
         if (this.dataLines.length > 0) {
           out.push(this.dataLines.join("\n"));
           this.dataLines = [];
+          this.dataBytes = 0;
         }
         continue;
       }
       if (line.startsWith(":")) continue; // comment / keep-alive
-      if (line.startsWith("data:")) this.dataLines.push(line.slice(5).replace(/^ /, ""));
+      if (line.startsWith("data:")) {
+        const d = line.slice(5).replace(/^ /, "");
+        this.dataBytes += d.length;
+        if (this.dataBytes > this.maxEventBytes) throw new Error("SSE event exceeds maxEventBytes");
+        this.dataLines.push(d);
+      }
       // event:/id:/retry: fields are ignored; OpenAI-style streams only use data:
     }
     return out;

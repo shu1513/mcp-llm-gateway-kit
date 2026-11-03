@@ -4,7 +4,7 @@
  * prove blocked requests never reached it.
  */
 import http from "node:http";
-import { ErrorCodes, isJsonRpcRequest, rpcError, type JsonRpcRequest } from "./jsonrpc.js";
+import { ErrorCodes, rpcError, validateEnvelope, type JsonRpcRequest } from "./jsonrpc.js";
 
 const TOOLS = [
   { name: "echo", description: "Echo text back", inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
@@ -60,13 +60,14 @@ export function createMockDownstream(): MockDownstream {
       const msgs = Array.isArray(parsed) ? parsed : [parsed];
       const results: unknown[] = [];
       for (const m of msgs) {
-        if (!isJsonRpcRequest(m)) {
-          results.push(rpcError(null, ErrorCodes.InvalidRequest, "Invalid request"));
+        const v = validateEnvelope(m);
+        if (!v.ok) {
+          results.push(rpcError(v.id, ErrorCodes.InvalidRequest, "Invalid request"));
           continue;
         }
-        calls.push(m);
-        if (m.id === undefined) continue; // notification
-        results.push(handle(m));
+        calls.push(v.req);
+        if (v.req.id === undefined) continue; // notification
+        results.push(handle(v.req));
       }
       if (results.length === 0) {
         res.writeHead(202).end();

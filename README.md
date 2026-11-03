@@ -1,6 +1,6 @@
 # AI Field Developer / Solutions Engineer — assessment
 
-Four runnable solutions, one TypeScript workspace, 60 tests.
+Four runnable solutions, one TypeScript workspace, 72 tests.
 
 | task | package | what it is |
 |---|---|---|
@@ -23,8 +23,8 @@ Each package is self-contained: `src/` (implementation + a mock peer so it runs 
 ## Assumptions made where the brief was open
 
 * **Task 1** returns protocol errors (`-32602`) for malformed arguments and tool-level `isError` results for business failures (unknown customer, suspended account), following the MCP tools spec. It is built on the SDK's low-level `Server` because the high-level `McpServer` swallows validation failures into tool results.
-* **Task 2** resolves tokens with a static token→role map (`GATEWAY_TOKENS`) behind one function; JWT/introspection is a drop-in there. `tools/list` is forwarded unfiltered, as asked. A batch containing any unauthorized call is answered locally in full rather than partially forwarded.
+* **Task 2** resolves tokens with a static token→role map (`GATEWAY_TOKENS`, fails closed when unset) behind one function; JWT/introspection is a drop-in there. `tools/list` is forwarded unfiltered, as asked. Batch members are judged individually per JSON-RPC 2.0 §6: blocked/invalid ones are answered locally, the rest forwarded and the responses merged.
 * **Task 3** speaks the OpenAI chat-completions SSE format. Card detection is Luhn-checked by default so order numbers survive; configurable.
-* **Task 4** fails over on `429`, timeout (3000 ms), connection failure and unparseable body; other non-2xx statuses are returned as `upstream_error` without failover. The pre-call token estimate is `chars/4 + max_tokens` and is replaced by the provider's reported usage afterwards. SQLite is `better-sqlite3`, on disk, WAL.
+* **Task 4** fails over on `429`, timeout (3000 ms), connection failure and unparseable body; other non-2xx statuses are returned as `upstream_error` without failover; client cancellation never triggers a second paid call. The pre-call token estimate is `chars/4 + max_tokens × n` (a `max_tokens` cap is injected when the caller set none) and is replaced by the provider's reported usage afterwards; a timed-out attempt keeps its estimate since it may have generated. SQLite is `better-sqlite3`, on disk, WAL.
 
 Everything is plain Node (`node:http`, global `fetch`), no framework, so the request/response handling is visible rather than hidden behind middleware.

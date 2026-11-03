@@ -84,6 +84,29 @@ describe("streaming equivalence", () => {
     expect(maxPending).toBeLessThanOrEqual(64);
   });
 
+  it("stays bounded when a complete match keeps growing (adversarial endless email)", () => {
+    const r = new StreamRedactor({ maxHold: 64 });
+    let out = r.push("a@b.co");
+    let maxPending = r.pending;
+    for (let i = 0; i < 400; i++) {
+      out += r.push("m");
+      maxPending = Math.max(maxPending, r.pending);
+    }
+    out += r.flush();
+    expect(maxPending).toBeLessThanOrEqual(64);
+    expect(out.startsWith("[REDACTED]")).toBe(true);
+    expect(out).not.toContain("a@b.com"); // the address itself never leaks
+  });
+
+  it("redacts a secret spread over three or more chunks with other text around it", () => {
+    const r = new StreamRedactor();
+    const chunks = ["Call ", "me: 12", "3-", "45-", "67", "89 or 41", "11 11", "11 1111 11", "11, thanks ", "jo", "e@", "x.", "org", "."];
+    let out = "";
+    for (const c of chunks) out += r.push(c);
+    out += r.flush();
+    expect(out).toBe("Call me: [REDACTED] or [REDACTED], thanks [REDACTED].");
+  });
+
   it("handles a 200 KB stream with bounded buffer", () => {
     const big = (SAMPLE + " ").repeat(600);
     const r = new StreamRedactor();

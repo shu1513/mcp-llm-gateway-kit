@@ -103,6 +103,30 @@ describe("router HTTP server", () => {
     secondary.mode = "ok";
   });
 
+  it("injects a max_tokens cap when the caller sets none, and reserves per choice", async () => {
+    const { normalizeBudget } = await import("../src/tokens.js");
+    const base = { messages: [{ role: "user", content: "x".repeat(40) }] };
+    expect(normalizeBudget(base, 256)).toMatchObject({ estimate: 10 + 4 + 256, body: { ...base, max_tokens: 256 } });
+    expect(normalizeBudget({ ...base, max_completion_tokens: 50 }).estimate).toBe(14 + 50);
+    expect(normalizeBudget({ ...base, max_tokens: 50, n: 3 }).estimate).toBe(14 + 150);
+    expect(normalizeBudget({ ...base, max_tokens: 50 }).body).not.toHaveProperty("max_completion_tokens");
+    // forwarded to the provider:
+    const res = await post({ model: "m", messages: [{ role: "user", content: "cap me" }] }, "tenant-E");
+    expect(res.status).toBe(200);
+    expect(Number(res.headers.get("x-ratelimit-remaining-tokens"))).toBeLessThanOrEqual(2000 - 2);
+  });
+
+  it("keeps the estimate for a timed-out primary even when the secondary succeeds", async () => {
+    primary.mode = "hang";
+    const res = await post(msg("slow one", 400), "tenant-F"); // estimate = 2+4+400 = 406
+    expect(res.headers.get("x-gateway-provider")).toBe("secondary");
+    primary.mode = "ok";
+    // Window now holds 406 (timed-out primary) + ~10 actual secondary usage. 1+4+1600 = 1605 only fits if the
+    // timed-out share had been released (10 + 1605 < 2000); with it kept (416 + 1605 > 2000) it is refused.
+    const next = await post(msg("x", 1600), "tenant-F");
+    expect(next.status).toBe(429);
+  });
+
   it("never over-admits under concurrent load", async () => {
     // tenant-D: budget 2000. 400-char prompt + max_tokens 100 reserves 204; the mock
     // echoes the prompt so actual usage settles to ~205 -> at most 9 can ever fit.

@@ -10,7 +10,10 @@
  * everything before it immediately. Each pattern has a "partial" regex that
  * recognises its own prefixes; the hold is the max over all of them, capped at
  * MAX_HOLD so a pathological run of pattern characters cannot grow memory.
- * Matches that would straddle the cut pull the cut back to their start.
+ * Matches that would straddle the cut pull the cut back to their start —
+ * unless the match itself is longer than MAX_HOLD (no real email/card is), in
+ * which case it is clipped at the cut and redacted as-is, so memory stays
+ * bounded even for an endless "a@b.commmmm…".
  *
  * Memory is O(MAX_HOLD + chunk), latency is one chunk, and output equals what a
  * whole-text redaction would produce (tested across every split point).
@@ -130,7 +133,12 @@ export class StreamRedactor {
         matches.push({ start: m.index, end: m.index + m[0].length, name: p.name });
       }
     }
-    for (const m of matches) if (m.start < cut && m.end > cut) cut = m.start;
+    for (const m of matches) {
+      if (m.start < cut && m.end > cut) {
+        if (m.end - m.start > this.maxHold) m.end = cut; // clip: redact what we have, keep memory bounded
+        else cut = m.start;
+      }
+    }
     if (cut <= 0) return "";
 
     const inRange = matches.filter((m) => m.end <= cut).sort((a, b) => a.start - b.start || b.end - a.end);

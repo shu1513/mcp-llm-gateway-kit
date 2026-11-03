@@ -36,7 +36,7 @@ describe("ModelRouter failover", () => {
     const res = await r.route(body);
     expect(res.provider).toBe("secondary");
     expect((res.body as { model: string }).model).toBe("backup-model"); // model override applied
-    expect(res.attempts.map((x) => x.outcome)).toEqual(["failover", "ok"]);
+    expect(res.attempts.map((x) => x.outcome)).toEqual(["rate_limited", "ok"]);
   });
 
   it("fails over when the primary exceeds the timeout", async () => {
@@ -83,6 +83,23 @@ describe("ModelRouter failover", () => {
     const err = (await r.route(body).catch((e) => e)) as GatewayError;
     expect(err.code).toBe("all_providers_failed");
     expect(err.toBody("x")).toEqual({ error: { code: "all_providers_failed", message: "All model providers are unavailable", request_id: "x", retry_after_ms: 1000 } });
+  });
+
+  it("treats client cancellation as terminal: no failover to a second paid call", async () => {
+    const a = await provider("primary", "hang");
+    const b = await provider("secondary", "ok");
+    const r = new ModelRouter({ providers: [{ name: "primary", url: a.url }, { name: "secondary", url: b.url }], timeoutMs: 2000 });
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 50);
+    const attempts: import("../src/router.js").Attempt[] = [];
+    const err = (await r.route(body, ac.signal, attempts).catch((e) => e)) as GatewayError;
+    expect(err.code).toBe("client_closed");
+    expect(attempts.map((x) => x.outcome)).toEqual(["cancelled"]);
+    expect(b.p.calls).toBe(0);
+    // Already-aborted signal: nothing is called at all.
+    const err2 = (await r.route(body, ac.signal).catch((e) => e)) as GatewayError;
+    expect(err2.code).toBe("client_closed");
+    expect(a.p.calls).toBe(1);
   });
 
   it("does not fail over after a successful slow primary (timer cleared, no double response)", async () => {

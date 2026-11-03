@@ -13,7 +13,19 @@ export function estimatePromptTokens(body: Record<string, unknown>): number {
   return Math.ceil(chars / 4) + 4 * messages.length;
 }
 
-export function estimateRequestTokens(body: Record<string, unknown>, defaultMaxTokens = 256): number {
-  const max = typeof body.max_tokens === "number" && body.max_tokens > 0 ? body.max_tokens : defaultMaxTokens;
-  return estimatePromptTokens(body) + max;
+/**
+ * Normalizes the output budget and returns the body that will be forwarded plus
+ * the token estimate to reserve. If the caller set no limit, `defaultMaxTokens`
+ * is injected into the forwarded request so the provider cannot generate more
+ * than what was reserved; `n` choices multiply the completion budget.
+ */
+export function normalizeBudget(
+  body: Record<string, unknown>,
+  defaultMaxTokens = 256,
+): { body: Record<string, unknown>; estimate: number; maxTokens: number } {
+  const explicit = [body.max_tokens, body.max_completion_tokens].find((v) => typeof v === "number" && v > 0) as number | undefined;
+  const maxTokens = Math.ceil(explicit ?? defaultMaxTokens);
+  const n = typeof body.n === "number" && body.n > 1 ? Math.ceil(body.n) : 1;
+  const forwarded = explicit === undefined ? { ...body, max_tokens: maxTokens } : body;
+  return { body: forwarded, estimate: estimatePromptTokens(body) + maxTokens * n, maxTokens };
 }

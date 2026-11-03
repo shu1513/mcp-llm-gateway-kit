@@ -10,6 +10,7 @@ export type GatewayErrorCode =
   | "upstream_rate_limited"
   | "upstream_error"
   | "all_providers_failed"
+  | "client_closed"
   | "internal_error";
 
 const STATUS: Record<GatewayErrorCode, number> = {
@@ -20,6 +21,7 @@ const STATUS: Record<GatewayErrorCode, number> = {
   upstream_rate_limited: 429,
   upstream_error: 502,
   all_providers_failed: 502,
+  client_closed: 499,
   internal_error: 500,
 };
 

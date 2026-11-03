@@ -88,9 +88,36 @@ describe("guardrail gateway (end to end)", () => {
     expect(frames.length).toBeGreaterThan(50);
   });
 
+  it("rejects non-object / unsupported bodies with 400 instead of crashing", async () => {
+    const { gw } = await setup({ text: "x" });
+    for (const body of ["null", "1", '"hello"', "[]", "{}", '{"messages":[],"n":2}']) {
+      const res = await fetch(`${gw}/v1/chat/completions`, { method: "POST", headers: { "content-type": "application/json" }, body });
+      expect(res.status, body).toBe(400);
+      expect((await res.json()).error.type).toBe("gateway_error");
+    }
+    // the server is still alive afterwards
+    expect(content(await streamThrough(gw, "echo:still fine"))).toBe("still fine");
+  });
+
+  it("stops reading upstream when the client disconnects mid-stream", async () => {
+    const text = "word ".repeat(5000);
+    let upstreamClosed = false;
+    const up = createMockUpstream({ text, sliceSize: 5, delayMs: 5 });
+    up.on("request", (_req, res) => res.on("close", () => (upstreamClosed = true)));
+    const upUrl = await listen(up);
+    const gw = await listen(createGuardrailGateway({ upstreamUrl: `${upUrl}/v1/chat/completions`, log: () => {} }));
+    const ac = new AbortController();
+    const res = await fetch(`${gw}/v1/chat/completions`, { method: "POST", body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }), signal: ac.signal });
+    await res.body!.getReader().read(); // first frame
+    ac.abort();
+    const deadline = Date.now() + 3000;
+    while (!upstreamClosed && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    expect(upstreamClosed).toBe(true);
+  });
+
   it("returns a sanitized 502 when upstream is down", async () => {
     const gw = await listen(createGuardrailGateway({ upstreamUrl: "http://127.0.0.1:1/v1/chat/completions", log: () => {} }));
-    const res = await fetch(`${gw}/v1/chat/completions`, { method: "POST", body: "{}" });
+    const res = await fetch(`${gw}/v1/chat/completions`, { method: "POST", body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }) });
     expect(res.status).toBe(502);
     expect(await res.json()).toEqual({ error: { message: "Upstream unavailable", type: "gateway_error" } });
   });

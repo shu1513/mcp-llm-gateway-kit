@@ -28,7 +28,7 @@ On each `push(delta)`: append, compute hold = max prefix length over all pattern
 Properties (all tested in `test/redactor.test.ts`):
 * **Correctness:** output is byte-identical to whole-text redaction for every slice size 1–24 and 200 random slicings.
 * **Latency:** plain prose is emitted immediately; only a trailing word/digit run is held. TTFT test: first token leaves the gateway before the upstream's second frame.
-* **Memory:** O(maxHold + delta). A 5,000-char run of token characters never holds more than `maxHold`; a 200 KB stream is processed with ≤256 chars buffered.
+* **Memory:** O(maxHold + delta). A 5,000-char run of token characters never holds more than `maxHold`; a 200 KB stream is processed with ≤256 chars buffered. A complete match that keeps growing past `maxHold` (an adversarial endless `a@b.commm…`) is clipped and redacted at the cut rather than retained.
 
 Luhn filtering (default on) keeps order numbers like `1234 5678 9012 3456` intact; set `{ luhn: false }` to redact any 13–19-digit run.
 
@@ -36,7 +36,9 @@ Luhn filtering (default on) keeps order numbers like `1234 5678 9012 3456` intac
 
 * Incremental SSE parser handles frames split mid-line and `\r\n`.
 * Each upstream content delta is pushed into the redactor; released text is re-emitted as a chunk carrying the upstream `id`/`model`/`created`. Role, `finish_reason` and `[DONE]` frames pass through after a `flush()`, so ordering is preserved. Frame boundaries shift (one upstream frame may produce zero or more output frames) but concatenated content is exact.
-* Client disconnect aborts the upstream fetch. Upstream errors return a sanitized JSON error (502), never upstream details.
+* **Backpressure:** each `res.write` is awaited for `drain` when the client socket is full, and the next upstream `read()` only happens after the previous frames are written, so a slow client throttles the upstream pull instead of growing Node's write queue. SSE lines/events over 1 MB abort the stream.
+* Client disconnect (`res` `close` before finish) aborts the upstream fetch and cancels the reader. Upstream errors return a sanitized JSON error (502), never upstream details.
+* Request bodies are validated (`messages[]` required, `n` must be 1, non-object JSON rejected) and all handler failures are caught, so a bad request cannot crash the process.
 
 ## Assumptions
 

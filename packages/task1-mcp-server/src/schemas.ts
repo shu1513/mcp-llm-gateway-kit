@@ -16,8 +16,7 @@ export const triggerRefundInput = {
   amount: z
     .number()
     .finite("amount must be a finite number")
-    .positive("amount must be greater than 0")
-    .max(1_000_000, "amount exceeds the single-refund ceiling"),
+    .positive("amount must be greater than 0"),
   reason: z.string().trim().min(10, "reason must be at least 10 characters"),
 };
 

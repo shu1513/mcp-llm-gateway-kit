@@ -2,9 +2,11 @@
  * Bearer token -> role resolution.
  *
  * Tokens are opaque strings looked up in a static map (env GATEWAY_TOKENS as
- * JSON, e.g. {"tok-admin":"admin","tok-view":"viewer"}). In production this is
- * the seam to swap for JWT verification or an introspection endpoint; the
- * gateway only depends on `resolveRole(token) -> Role | undefined`.
+ * JSON, e.g. {"tok-admin":"admin","tok-view":"viewer"}). The gateway fails
+ * closed: with no GATEWAY_TOKENS it refuses to start unless ALLOW_DEV_TOKENS=1
+ * explicitly opts into the well-known demo tokens. In production this is the
+ * seam to swap for JWT verification or an introspection endpoint; the gateway
+ * only depends on `authenticate(header) -> Principal | undefined`.
  */
 export type Role = "admin" | "viewer";
 
@@ -15,8 +17,14 @@ export interface Principal {
 
 const ROLES: ReadonlySet<string> = new Set<Role>(["admin", "viewer"]);
 
+export const DEV_TOKENS = '{"dev-admin-token":"admin","dev-viewer-token":"viewer"}';
+
 export function loadTokenMap(env: NodeJS.ProcessEnv = process.env): Map<string, Role> {
-  const raw = env.GATEWAY_TOKENS ?? '{"dev-admin-token":"admin","dev-viewer-token":"viewer"}';
+  let raw = env.GATEWAY_TOKENS;
+  if (raw === undefined) {
+    if (env.ALLOW_DEV_TOKENS !== "1") throw new Error("GATEWAY_TOKENS is not set (set it, or ALLOW_DEV_TOKENS=1 for the demo tokens)");
+    raw = DEV_TOKENS;
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);

@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { AddressInfo } from "node:net";
 import { createGateway, type GatewayEvent } from "../src/gateway.js";
+import { loadTokenMap } from "../src/auth.js";
+import { validateEnvelope } from "../src/jsonrpc.js";
 import { createMockDownstream } from "../src/mock-downstream.js";
 
 const tokens = new Map<string, "admin" | "viewer">([
@@ -98,19 +100,67 @@ describe("MCP gateway", () => {
     expect((await res.json()).error.code).toBe(-32602);
   });
 
-  it("answers batches locally when any member is unauthorized", async () => {
+  it("judges batch members independently: forwards the allowed ones, answers the rest locally", async () => {
     const before = downstream.calls.length;
     const res = await rpc("tok-viewer", [
       { jsonrpc: "2.0", id: 10, method: "tools/list" },
       { jsonrpc: "2.0", id: 11, method: "tools/call", params: { name: "admin_reset_key" } },
       { jsonrpc: "2.0", method: "notifications/initialized" },
+      { jsonrpc: "2.0", method: "tools/call", params: { name: "admin_reset_key" } }, // unauthorized notification: dropped
+      7, // invalid envelope
+      { jsonrpc: "2.0", id: { bad: true }, method: "ping" }, // invalid id
+      { jsonrpc: "2.0", id: 12, method: "ping", params: "scalar" }, // invalid params
+    ]);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const byId = Object.fromEntries(body.map((m: { id: unknown }) => [JSON.stringify(m.id), m]));
+    expect(byId["10"].result.tools).toHaveLength(3); // forwarded + merged
+    expect(byId["11"].error.code).toBe(-32001);
+    expect(byId["12"].error.code).toBe(-32600);
+    expect(body.filter((m: { id: unknown }) => m.id === null).map((m: { error: { code: number } }) => m.error.code)).toEqual([-32600, -32600]);
+    expect(body).toHaveLength(5);
+    // Downstream saw only the list + the harmless notification.
+    const forwarded = downstream.calls.slice(before);
+    expect(forwarded.map((c) => c.method)).toEqual(["tools/list", "notifications/initialized"]);
+  });
+
+  it("answers a fully-local batch with 403 and never touches downstream", async () => {
+    const before = downstream.calls.length;
+    const res = await rpc("tok-viewer", [
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "admin_a" } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "admin_b" } },
     ]);
     expect(res.status).toBe(403);
-    const body = await res.json();
-    expect(body).toHaveLength(2);
-    expect(body[0]).toMatchObject({ id: 10, error: { code: -32600 } });
-    expect(body[1]).toMatchObject({ id: 11, error: { code: -32001 } });
+    expect((await res.json()).map((m: { error: { code: number } }) => m.error.code)).toEqual([-32001, -32001]);
     expect(downstream.calls.length).toBe(before);
+  });
+
+  it("returns 202 with no body for notifications it drops", async () => {
+    const res = await rpc("tok-viewer", { jsonrpc: "2.0", method: "tools/call", params: { name: "admin_reset_key" } });
+    expect(res.status).toBe(202);
+    expect(await res.text()).toBe("");
+  });
+
+  it("validates the JSON-RPC envelope strictly", () => {
+    expect(validateEnvelope({ jsonrpc: "2.0", id: {}, method: "x" })).toMatchObject({ ok: false, id: null });
+    expect(validateEnvelope({ jsonrpc: "2.0", id: 1.5, method: "x", params: [] })).toMatchObject({ ok: true });
+    expect(validateEnvelope({ jsonrpc: "2.0", id: "s", method: "x", params: 3 })).toMatchObject({ ok: false, id: "s" });
+    expect(validateEnvelope({ jsonrpc: "2.0", id: 4, method: "" })).toMatchObject({ ok: false, id: 4 });
+    expect(validateEnvelope({ jsonrpc: "2.0", id: null, method: "x" })).toMatchObject({ ok: true });
+  });
+
+  it("fails closed when no token configuration is present", () => {
+    expect(() => loadTokenMap({})).toThrow(/GATEWAY_TOKENS/);
+    expect(loadTokenMap({ ALLOW_DEV_TOKENS: "1" }).get("dev-admin-token")).toBe("admin");
+    expect(loadTokenMap({ GATEWAY_TOKENS: '{"t":"viewer"}' }).get("t")).toBe("viewer");
+    expect(() => loadTokenMap({ GATEWAY_TOKENS: '{"t":"root"}' })).toThrow(/unknown role/);
+  });
+
+  it("rejects oversized bodies with 413", async () => {
+    const gw = createGateway({ downstreamUrl: "http://127.0.0.1:1/mcp", tokens, maxBodyBytes: 100, onEvent: () => {} });
+    const url = `http://127.0.0.1:${await listen(gw)}/mcp`;
+    const res = await fetch(url, { method: "POST", headers: { authorization: "Bearer tok-admin" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "x", params: { pad: "y".repeat(500) } }) });
+    expect(res.status).toBe(413);
   });
 
   it("forwards fully-authorized batches", async () => {
@@ -128,11 +178,15 @@ describe("MCP gateway", () => {
     expect((await (await rpc("tok-admin", [])).json()).error.code).toBe(-32600);
   });
 
-  it("returns -32002 when downstream is unreachable", async () => {
+  it("returns -32002 when downstream is unreachable, and 202 for an unanswerable notification", async () => {
     const gw = createGateway({ downstreamUrl: "http://127.0.0.1:1/mcp", tokens, onEvent: () => {} });
     const url = `http://127.0.0.1:${await listen(gw)}/mcp`;
-    const res = await fetch(url, { method: "POST", headers: { authorization: "Bearer tok-admin" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+    const post = (b: unknown) => fetch(url, { method: "POST", headers: { authorization: "Bearer tok-admin" }, body: JSON.stringify(b) });
+    const res = await post({ jsonrpc: "2.0", id: 1, method: "tools/list" });
     expect(res.status).toBe(502);
     expect((await res.json()).error.code).toBe(-32002);
+    const notif = await post({ jsonrpc: "2.0", method: "notifications/initialized" });
+    expect(notif.status).toBe(202);
+    expect(await notif.text()).toBe("");
   });
 });

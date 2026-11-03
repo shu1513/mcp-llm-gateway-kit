@@ -30,13 +30,23 @@ export function rpcError(id: JsonRpcId, code: number, message: string, data?: un
   return { jsonrpc: "2.0", id, error: { code, message, ...(data === undefined ? {} : { data }) } };
 }
 
-export function isJsonRpcRequest(v: unknown): v is JsonRpcRequest {
-  return (
-    typeof v === "object" &&
-    v !== null &&
-    (v as JsonRpcRequest).jsonrpc === "2.0" &&
-    typeof (v as JsonRpcRequest).method === "string"
-  );
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/**
+ * Full envelope check per JSON-RPC 2.0 §4: jsonrpc "2.0", method string,
+ * id absent | string | number | null, params absent | object | array.
+ * Returns the reason when invalid.
+ */
+export function validateEnvelope(v: unknown): { ok: true; req: JsonRpcRequest } | { ok: false; reason: string; id: JsonRpcId } {
+  if (!isObject(v)) return { ok: false, reason: "not an object", id: null };
+  const id = v.id;
+  const idOk = id === undefined || id === null || typeof id === "string" || (typeof id === "number" && Number.isFinite(id));
+  const safeId: JsonRpcId = idOk && id !== undefined ? (id as JsonRpcId) : null;
+  if (!idOk) return { ok: false, reason: "id must be a string, number or null", id: null };
+  if (v.jsonrpc !== "2.0") return { ok: false, reason: 'jsonrpc must be "2.0"', id: safeId };
+  if (typeof v.method !== "string" || v.method.length === 0) return { ok: false, reason: "method must be a non-empty string", id: safeId };
+  if (v.params !== undefined && !isObject(v.params) && !Array.isArray(v.params)) return { ok: false, reason: "params must be an object or array", id: safeId };
+  return { ok: true, req: v as unknown as JsonRpcRequest };
 }
 
 export function isNotification(req: JsonRpcRequest): boolean {

@@ -8,14 +8,19 @@
  * Every failure returns the standardized {error:{code,message,request_id}}
  * payload from errors.ts; nothing from upstream (status text, body, stack)
  * reaches the client. Details go to stderr with the same request_id.
+ *
+ * Token accounting on failure: a provider that answered 429 / was unreachable
+ * generated nothing, so the reservation is released. A provider that *timed
+ * out* may well have generated (and billed) tokens, so its share of the
+ * estimate is kept — conservative by design.
  */
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { openDb, type Db } from "./db.js";
 import { GatewayError, toGatewayError } from "./errors.js";
 import { SlidingWindowRateLimiter, type RateLimiterOptions } from "./rateLimiter.js";
-import { ModelRouter, type RouterOptions } from "./router.js";
-import { estimateRequestTokens } from "./tokens.js";
+import { ModelRouter, type Attempt, type RouterOptions } from "./router.js";
+import { normalizeBudget } from "./tokens.js";
 
 export interface ServerOptions {
   db: Db;
@@ -25,17 +30,21 @@ export interface ServerOptions {
   log?: (msg: string, extra?: unknown) => void;
 }
 
+/** Byte-bounded body read; decodes once so multibyte characters split across chunks survive. */
 function readBody(req: http.IncomingMessage, limit: number): Promise<string> {
   return new Promise((resolve, reject) => {
-    let raw = "";
+    const chunks: Buffer[] = [];
+    let size = 0;
     req.on("data", (c: Buffer) => {
-      raw += c;
-      if (raw.length > limit) {
+      size += c.length;
+      if (size > limit) {
         reject(new GatewayError("bad_request", "Payload too large"));
-        req.destroy();
+        req.pause();
+        return;
       }
+      chunks.push(c);
     });
-    req.on("end", () => resolve(raw));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
 }
@@ -57,6 +66,21 @@ export function createServer(opts: ServerOptions): http.Server & { limiter: Slid
     };
     const tenant = typeof req.headers["x-api-key"] === "string" ? req.headers["x-api-key"] : undefined;
     let reservationId: number | undefined;
+    let estimate = 0;
+    const attempts: Attempt[] = [];
+    const controller = new AbortController();
+    const onClientGone = () => {
+      if (!res.writableFinished) controller.abort();
+    };
+    res.on("close", onClientGone);
+    /** Best-effort DB writes: a failing disk must never prevent the sanitized response. */
+    const safely = (what: string, fn: () => void) => {
+      try {
+        fn();
+      } catch (e) {
+        log("db write failed", { requestId, what, message: (e as Error).message });
+      }
+    };
 
     try {
       if (req.method !== "POST" || req.url !== "/v1/chat/completions") throw new GatewayError("bad_request", "Unknown route");
@@ -70,20 +94,21 @@ export function createServer(opts: ServerOptions): http.Server & { limiter: Slid
       }
       if (typeof body !== "object" || body === null || !Array.isArray(body.messages)) throw new GatewayError("bad_request", "Body must include messages[]");
 
-      const estimate = estimateRequestTokens(body);
+      const budget = normalizeBudget(body);
+      estimate = budget.estimate;
       const decision = limiter.reserve(tenant, estimate);
       if (!decision.allowed) {
         throw new GatewayError("rate_limited", `Token rate limit exceeded (${decision.usedTokens}/${opts.limiter.limitTokens} tokens in window)`, decision.retryAfterMs);
       }
       reservationId = decision.reservationId;
 
-      const controller = new AbortController();
-      req.on("close", () => controller.abort());
-      const result = await router.route(body, controller.signal);
+      const result = await router.route(budget.body, controller.signal, attempts);
 
-      const actual = result.totalTokens ?? estimate;
-      limiter.settle(reservationId, actual);
-      logReq.run(requestId, tenant, Date.now(), result.provider, 200, null, actual);
+      // Provider-reported usage, plus the full estimate for any earlier attempt that timed out (it may have generated).
+      const timedOut = attempts.filter((a) => a.outcome === "timeout").length;
+      const actual = (result.totalTokens ?? estimate) + timedOut * estimate;
+      safely("settle", () => limiter.settle(reservationId!, actual));
+      safely("log", () => logReq.run(requestId, tenant, Date.now(), result.provider, 200, null, actual));
       log("request ok", { requestId, tenant, provider: result.provider, attempts: result.attempts, tokens: actual });
       send(200, result.body, {
         "x-gateway-provider": result.provider,
@@ -92,12 +117,18 @@ export function createServer(opts: ServerOptions): http.Server & { limiter: Slid
       });
     } catch (err) {
       const ge = toGatewayError(err);
-      if (reservationId !== undefined) limiter.settle(reservationId, 0); // failed call consumed nothing
-      if (tenant) logReq.run(requestId, tenant, Date.now(), null, ge.status, ge.code, null);
-      log("request failed", { requestId, code: ge.code, message: ge.message, internal: ge.internal instanceof Error ? ge.internal.message : ge.internal });
+      if (reservationId !== undefined) {
+        // Keep the estimate for every timed-out attempt (unknown consumption); release the rest.
+        const keep = attempts.filter((a) => a.outcome === "timeout" || a.outcome === "cancelled").length * estimate;
+        safely("settle", () => limiter.settle(reservationId!, keep));
+      }
+      if (tenant) safely("log", () => logReq.run(requestId, tenant, Date.now(), null, ge.status, ge.code, null));
+      log("request failed", { requestId, code: ge.code, message: ge.message, attempts, internal: ge.internal instanceof Error ? ge.internal.message : ge.internal });
       const headers: Record<string, string> = {};
       if (ge.retryAfterMs !== undefined && Number.isFinite(ge.retryAfterMs)) headers["retry-after"] = String(Math.ceil(ge.retryAfterMs / 1000));
-      send(ge.status, ge.toBody(requestId), headers);
+      if (!res.headersSent) send(ge.status, ge.toBody(requestId), headers);
+    } finally {
+      res.off("close", onClientGone);
     }
   });
 

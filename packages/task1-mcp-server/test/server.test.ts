@@ -21,11 +21,15 @@ describe("customer-ops MCP server (via SDK client)", () => {
     await client.close();
   });
 
-  it("lists both tools with schemas", async () => {
+  it("lists both tools with schemas that mirror the Zod rules", async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(["get_customer_record", "trigger_refund"]);
     const refund = tools.find((t) => t.name === "trigger_refund")!;
-    expect(refund.inputSchema.required).toEqual(expect.arrayContaining(["customer_id", "amount", "reason"]));
+    expect(refund.inputSchema).toMatchObject({
+      required: ["customer_id", "amount", "reason"],
+      additionalProperties: false,
+      properties: { customer_id: { pattern: "^CUST-[A-Z0-9]{5}$" }, amount: { type: "number", exclusiveMinimum: 0 }, reason: { minLength: 10 } },
+    });
   });
 
   it("returns a customer record for a well-formed id", async () => {
@@ -85,8 +89,11 @@ describe("customer-ops MCP server (via SDK client)", () => {
 });
 
 describe("stdio isolation", () => {
+  // Launch exactly as the README documents (npm wrapper included): a `> script`
+  // banner from npm would land on stdout and fail the JSON check below.
+  const root = path.resolve(here, "../../..");
   it("writes only JSON-RPC frames to stdout; logs go to stderr", async () => {
-    const child = spawn(tsx, [serverPath], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn("npm", ["run", "-s", "task1"], { cwd: root, stdio: ["pipe", "pipe", "pipe"] });
     let out = "";
     let err = "";
     child.stdout.on("data", (d) => (out += d));
@@ -98,6 +105,7 @@ describe("stdio isolation", () => {
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "get_customer_record", arguments: { customer_id: "CUST-00001" } } },
       { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "get_customer_record", arguments: { customer_id: "nope" } } },
       "this is not json\n",
+      { jsonrpc: "1.0", id: 99, method: "tools/list" },
       { jsonrpc: "2.0", id: 4, method: "tools/list" },
     ];
     for (const f of frames) child.stdin.write(typeof f === "string" ? f : JSON.stringify(f) + "\n");
@@ -115,7 +123,9 @@ describe("stdio isolation", () => {
     const byId = Object.fromEntries(lines.map((l) => JSON.parse(l)).filter((m) => m.id !== undefined).map((m) => [m.id, m]));
     expect(byId[2].result).toBeDefined();
     expect(byId[3].error.code).toBe(-32602);
-    expect(byId[4].result.tools).toHaveLength(2); // survived the garbage frame
+    expect(byId[4].result.tools).toHaveLength(2); // survived the garbage frames
+    const nullIdErrors = lines.map((l) => JSON.parse(l)).filter((m) => m.id === null).map((m) => m.error.code);
+    expect(nullIdErrors).toEqual([-32700, -32600]); // parse error, then invalid request (jsonrpc 1.0)
 
     expect(err).toContain('"level":"info"'); // logs landed on stderr
     expect(out).not.toContain('"level":"info"');

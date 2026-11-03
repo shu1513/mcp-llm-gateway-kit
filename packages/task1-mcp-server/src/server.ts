@@ -10,7 +10,10 @@
  *  - malformed arguments (bad customer_id format, non-positive amount, short
  *    reason, unknown fields)            -> JSON-RPC error -32602 Invalid params
  *  - unknown tool name                  -> -32602 Invalid params (MCP convention)
- *  - unknown method / unparseable frame -> -32601 / -32700 (SDK transport layer)
+ *  - unknown method                     -> -32601 (SDK protocol layer)
+ *  - unparseable / non-JSON-RPC frame   -> -32700 / -32600 with id null, sent by
+ *                                          our transport error hook (the SDK only
+ *                                          logs these); the server keeps serving
  *  - valid args that fail a business rule (no such customer, suspended)
  *                                       -> tool result with isError: true, per
  *                                          the MCP tools spec, so the model can
@@ -29,7 +32,7 @@ import {
   type CallToolResult,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import type { ZodError } from "zod";
+import { ZodError } from "zod";
 import { log, protectStdout } from "./log.js";
 import { getCustomerRecordSchema, triggerRefundSchema } from "./schemas.js";
 import { store } from "./store.js";
@@ -55,7 +58,7 @@ export const TOOLS: Tool[] = [
       type: "object",
       properties: {
         customer_id: { type: "string", pattern: "^CUST-[A-Z0-9]{5}$" },
-        amount: { type: "number", exclusiveMinimum: 0, maximum: 1_000_000 },
+        amount: { type: "number", exclusiveMinimum: 0 },
         reason: { type: "string", minLength: 10 },
       },
       required: ["customer_id", "amount", "reason"],
@@ -111,9 +114,30 @@ export function buildServer(): Server {
   return server;
 }
 
+/**
+ * The SDK's stdio transport drops frames it cannot decode after calling
+ * onerror. JSON-RPC 2.0 says a Parse error / Invalid Request must be answered
+ * with id null, so we hook onerror after connect() (which installs the
+ * protocol's own handler) and emit that response before delegating.
+ */
+export function installFrameErrorResponses(transport: StdioServerTransport): void {
+  const previous = transport.onerror;
+  transport.onerror = (err: Error) => {
+    if (err instanceof SyntaxError) {
+      void transport.send({ jsonrpc: "2.0", id: null, error: { code: ErrorCode.ParseError, message: "Parse error" } } as never);
+    } else if (err instanceof ZodError || err.name === "ZodError") {
+      // duck-typed: the SDK may validate with its own zod copy
+      void transport.send({ jsonrpc: "2.0", id: null, error: { code: ErrorCode.InvalidRequest, message: "Invalid Request" } } as never);
+    }
+    previous?.(err);
+  };
+}
+
 async function main(): Promise<void> {
   const server = buildServer();
-  await server.connect(new StdioServerTransport());
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  installFrameErrorResponses(transport);
   log.info("customer-ops MCP server listening on stdio");
 }
 
