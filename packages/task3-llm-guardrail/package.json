@@ -1,0 +1,8 @@
+{
+  "name": "task3-llm-guardrail",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": { "start": "tsx src/gateway.ts" },
+  "dependencies": {}
+}

@@ -1,0 +1,24 @@
+{
+  "name": "ai-field-assessment",
+  "private": true,
+  "version": "1.0.0",
+  "description": "AI Field Developer / Solutions Engineer assessment: MCP server, MCP gateway, streaming PII guardrail, rate-limited model router",
+  "type": "module",
+  "workspaces": ["packages/*"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "task1": "npm run start -w task1-mcp-server",
+    "task2": "npm run start -w task2-mcp-gateway",
+    "task3": "npm run start -w task3-llm-guardrail",
+    "task4": "npm run start -w task4-model-router"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.5"
+  }
+}
